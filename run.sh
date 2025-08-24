@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "************************************************"
-echo " Combined Node-RED & Tailscale Installation Script"
+echo " Combined Node-RED + Dashboard + Tailscale Installation"
 echo "************************************************"
 
 # 1. Update system
@@ -36,14 +36,22 @@ nvm alias default 18
 echo "Installing Node-RED globally..."
 npm install -g --unsafe-perm node-red
 
-echo "Installing Node-RED nodes (node-red-node-serialport@2.0.3)..."
+# 5. Install Node-RED extra nodes
 cd "/home/$USER/.node-red" || {
   echo "Could not change directory to ~/.node-red—continuing..."
 }
+
+echo "Installing Node-RED commonly used modules..."
+npm install node-red-dashboard
 npm install node-red-node-serialport@2.0.3
+npm install node-red-contrib-modbus
+npm install node-red-contrib-mqtt-broker
+npm install node-red-contrib-influxdb
+npm install node-red-contrib-file
+
 cd - >/dev/null
 
-# 5. Create systemd service for Node-RED
+# 6. Create systemd service for Node-RED
 echo "Setting up Node-RED as a systemd service..."
 sudo tee /etc/systemd/system/node-red.service > /dev/null <<EOF
 [Unit]
@@ -66,9 +74,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable node-red.service
 sudo systemctl start node-red.service
 
-# 6. Install Tailscale
+# 7. Install Tailscale
 echo "Installing Tailscale..."
-# Add Tailscale repository
 sudo mkdir -p /etc/apt/sources.list.d/
 echo 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu focal main' \
   | sudo tee /etc/apt/sources.list.d/tailscale.list > /dev/null
@@ -79,15 +86,14 @@ curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.noarmor.gpg \
 sudo apt update
 sudo apt install -y tailscale
 
-# Enable and start Tailscale daemon
 echo "Enabling and starting tailscaled service..."
 sudo systemctl enable tailscaled --now
 
-# Optionally prompt user to run `tailscale up`
-echo "To finalize Tailscale setup, run 'sudo tailscale up' when ready."
-
 echo "************************************************"
-echo " Installation complete! Node-RED and Tailscale are now set up."
-echo " Node-RED should be running as a service."
-echo " To access Node-RED: http://<your-server-ip>:1880 (within your network or via Tailscale VPN)."
+echo "✅ Installation complete!"
+echo " Node-RED is running as a service."
+echo " Installed nodes: dashboard, serialport, modbus, mqtt-broker, influxdb, file."
+echo " Tailscale installed & running (use 'sudo tailscale up' to join your tailnet)."
+echo " Access Node-RED editor: http://<ip>:1880"
+echo " Dashboard UI: http://<ip>:1880/ui"
 echo "************************************************"
