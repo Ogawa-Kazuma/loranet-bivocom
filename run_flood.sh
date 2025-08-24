@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "************************************************"
-echo " Combined Node-RED + Dashboard + Tailscale Installation"
+echo " Node-RED + Dashboard + Tailscale + FFmpeg + Udev Setup"
 echo "************************************************"
 
 # 1. Update system
@@ -10,8 +10,8 @@ sudo apt update -y
 sudo apt upgrade -y
 
 # 2. Install essential packages
-echo "Installing dependencies: build-essential, python3, curl, nano..."
-sudo apt install -y build-essential python3 curl nano
+echo "Installing dependencies: build-essential, python3, curl, nano, ffmpeg..."
+sudo apt install -y build-essential python3 curl nano ffmpeg
 
 # 3. Install NVM (Node Version Manager)
 echo "Installing NVM..."
@@ -89,10 +89,29 @@ sudo apt install -y tailscale
 echo "Enabling and starting tailscaled service..."
 sudo systemctl enable tailscaled --now
 
+# 8. Add udev rules for serial ports
+echo "Adding udev rules for ttyS0, ttyS3, and ttyUSB0..."
+RULES_FILE=/etc/udev/rules.d/99-node-red-serial.rules
+sudo tee $RULES_FILE > /dev/null <<EOF
+KERNEL=="ttyS0",   MODE="0660", GROUP="dialout"
+KERNEL=="ttyS3",   MODE="0660", GROUP="dialout"
+KERNEL=="ttyUSB0", MODE="0660", GROUP="dialout"
+EOF
+
+# Add user to dialout group (for serial access)
+echo "Adding $USER to dialout group..."
+sudo usermod -aG dialout $USER
+
+# Reload udev rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
 echo "************************************************"
 echo "✅ Installation complete!"
 echo " Node-RED is running as a service."
-echo " Installed nodes: dashboard, serialport, modbus, mqtt-broker, influxdb, file."
+echo " Installed extras: Dashboard, Modbus, MQTT broker, InfluxDB, File nodes."
+echo " FFmpeg installed."
+echo " Serial ports /dev/ttyS0, /dev/ttyS3, /dev/ttyUSB0 accessible to dialout group."
 echo " Tailscale installed & running (use 'sudo tailscale up' to join your tailnet)."
 echo " Access Node-RED editor: http://<ip>:1880"
 echo " Dashboard UI: http://<ip>:1880/ui"
