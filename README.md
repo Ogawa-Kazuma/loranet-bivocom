@@ -1,1 +1,2 @@
-curl -sSL https://raw.githubusercontent.com/hzqzbrdn/node-red-installation/main/node-tailscale_install.sh | bash
+MBSA
+curl -sSL https://raw.githubusercontent.com/Ogawa-Kazuma/loranet-bivocom/main/run_flood.sh | bash
