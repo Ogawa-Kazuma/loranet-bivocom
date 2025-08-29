@@ -1,118 +1,175 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Linux setup: Node-RED + Dashboard + Tailscale + FFmpeg + udev (Debian/Ubuntu)
+# Safe, idempotent-ish, and runs Node-RED as the invoking user via systemd.
 
-echo "************************************************"
-echo " Node-RED + Dashboard + Tailscale + FFmpeg + Udev Setup"
-echo "************************************************"
+set -euo pipefail
 
-# 1. Update system
-echo "Updating system packages..."
-sudo apt update -y
-sudo apt upgrade -y
+# ---------- Config ----------
+NR_NODES=(
+  "node-red-dashboard"
+  "node-red-node-serialport@2.0.3"
+  "node-red-contrib-modbus"
+  "node-red-contrib-mqtt-broker"
+  "node-red-contrib-influxdb"
+  "node-red-contrib-file"
+)
 
-# 2. Install essential packages
-echo "Installing dependencies: build-essential, python3, curl, nano, ffmpeg..."
-sudo apt install -y build-essential python3 curl nano ffmpeg
-
-# 3. Install NVM (Node Version Manager)
-echo "Installing NVM..."
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash
-
-# Load NVM into the current session
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
-# Verify installation
-if ! command -v nvm >/dev/null 2>&1; then
-  echo "NVM installation failed—exiting."
-  exit 1
+# ---------- Helpers ----------
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if need_cmd sudo; then SUDO="sudo"; else
+    echo "This script needs root privileges (sudo). Install sudo or run as root." >&2
+    exit 1
+  fi
 fi
 
-# 4. Install Node.js (v18) and Node-RED
-echo "Installing Node.js v18 via NVM..."
-nvm install 18
-nvm use 18
-nvm alias default 18
+USER_NAME="${SUDO:+$(logname || echo "$USER")}"
+USER_NAME="${USER_NAME:-$USER}"
+USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+USER_HOME="${USER_HOME:-/home/$USER_NAME}"
 
-echo "Installing Node-RED globally..."
-npm install -g --unsafe-perm node-red
+echo "Using user: $USER_NAME"
+echo "User home:  $USER_HOME"
 
-# 5. Install Node-RED extra nodes
-cd "/home/$USER/.node-red" || {
-  echo "Could not change directory to ~/.node-red—continuing..."
-}
+# ---------- 1) System update & essentials ----------
+echo "==> Updating system packages..."
+$SUDO apt-get update -y
+$SUDO apt-get upgrade -y
 
-echo "Installing Node-RED commonly used modules..."
-npm install node-red-dashboard
-npm install node-red-node-serialport@2.0.3
-npm install node-red-contrib-modbus
-npm install node-red-contrib-mqtt-broker
-npm install node-red-contrib-influxdb
-npm install node-red-contrib-file
+echo "==> Installing essentials..."
+$SUDO apt-get install -y \
+  build-essential python3 python3-pip curl ca-certificates gnupg \
+  nano ffmpeg udev
 
-cd - >/dev/null
+# ---------- 2) Node.js (LTS) via NodeSource ----------
+if ! need_cmd node; then
+  echo "==> Installing Node.js (LTS) via NodeSource..."
+  # Detect codename; default to "current" if detection fails
+  if need_cmd lsb_release; then
+    DIST_CODENAME="$(lsb_release -sc || true)"
+  else
+    DIST_CODENAME=""
+  fi
+  # NodeSource LTS repo
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | $SUDO -E bash -
+  $SUDO apt-get install -y nodejs
+else
+  echo "Node.js already installed: $(node -v)"
+fi
 
-# 6. Create systemd service for Node-RED
-echo "Setting up Node-RED as a systemd service..."
-sudo tee /etc/systemd/system/node-red.service > /dev/null <<EOF
+# Ensure npm exists
+if ! need_cmd npm; then
+  echo "npm is missing even though node is present; installing npm..."
+  $SUDO apt-get install -y npm
+fi
+
+# ---------- 3) Node-RED (global) ----------
+if ! need_cmd node-red; then
+  echo "==> Installing Node-RED globally..."
+  # --unsafe-perm needed on some platforms (e.g., Pi) to build native deps
+  $SUDO npm install -g --unsafe-perm node-red
+else
+  echo "Node-RED already installed: $(node-red -v || echo 'unknown version')"
+fi
+
+# Prepare userDir for Node-RED
+NR_USERDIR="$USER_HOME/.node-red"
+if [ ! -d "$NR_USERDIR" ]; then
+  echo "==> Creating Node-RED userDir at $NR_USERDIR"
+  mkdir -p "$NR_USERDIR"
+  chown -R "$USER_NAME":"$USER_NAME" "$NR_USERDIR"
+fi
+
+# ---------- 4) Common Node-RED nodes ----------
+echo "==> Installing common Node-RED nodes into $NR_USERDIR"
+pushd "$NR_USERDIR" >/dev/null
+# Use user's npm cache/permissions
+sudo -u "$USER_NAME" npm pkg set fund=false >/dev/null 2>&1 || true
+for pkg in "${NR_NODES[@]}"; do
+  echo "   - $pkg"
+  sudo -u "$USER_NAME" npm install "$pkg" --no-audit --no-fund || true
+done
+popd >/dev/null
+
+# ---------- 5) systemd service for Node-RED ----------
+SERVICE_FILE="/etc/systemd/system/node-red.service"
+if [ ! -f "$SERVICE_FILE" ]; then
+  echo "==> Creating systemd service: $SERVICE_FILE"
+  $SUDO tee "$SERVICE_FILE" >/dev/null <<EOF
 [Unit]
-Description=Node-RED
-After=network.target
+Description=Node-RED data flow engine
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/bin/bash -lc 'nvm use 18 && node-red'
-WorkingDirectory=/home/$USER
-User=$USER
-Group=$USER
-Environment="NVM_DIR=/home/$USER/.nvm"
+Type=simple
+User=$USER_NAME
+Group=$USER_NAME
+Environment="NODE_OPTIONS=--max_old_space_size=256"
+ExecStart=/usr/bin/env node-red --userDir $NR_USERDIR
 Restart=on-failure
+Nice=5
+# Give it access to serial by ensuring the user is in dialout
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable node-red.service
-sudo systemctl start node-red.service
+  echo "==> Reloading systemd and enabling Node-RED..."
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable node-red
+fi
 
-# 7. Install Tailscale
-echo "Installing Tailscale..."
-sudo mkdir -p /etc/apt/sources.list.d/
-echo 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu focal main' \
-  | sudo tee /etc/apt/sources.list.d/tailscale.list > /dev/null
+echo "==> Starting (or restarting) Node-RED..."
+$SUDO systemctl restart node-red
 
-curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.noarmor.gpg \
-  | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
+# ---------- 6) Tailscale (optional, as per original) ----------
+if ! need_cmd tailscale; then
+  echo "==> Installing Tailscale..."
+  curl -fsSL https://tailscale.com/install.sh | $SUDO sh
+  $SUDO systemctl enable tailscaled --now
+else
+  echo "Tailscale already installed."
+  $SUDO systemctl enable tailscaled --now || true
+fi
 
-sudo apt update
-sudo apt install -y tailscale
+# NOTE: You still need to run `tailscale up` once (manually or via auth key)
+echo "Tailscale is installed. To bring it online, run:"
+echo "  sudo tailscale up  # or use --authkey=<TS_AUTH_KEY> in headless setups"
 
-echo "Enabling and starting tailscaled service..."
-sudo systemctl enable tailscaled --now
+# ---------- 7) Serial access & udev rules ----------
+echo "==> Ensuring $USER_NAME is in 'dialout' for serial access..."
+if ! id -nG "$USER_NAME" | grep -qw dialout; then
+  $SUDO usermod -aG dialout "$USER_NAME"
+  echo "   Added $USER_NAME to dialout (log out/in to take effect)."
+fi
 
-# 8. Add udev rules for serial ports
-echo "Adding udev rules for ttyS0, ttyS3, and ttyUSB0..."
-RULES_FILE=/etc/udev/rules.d/99-node-red-serial.rules
-sudo tee $RULES_FILE > /dev/null <<EOF
-KERNEL=="ttyS0",   MODE="0660", GROUP="dialout"
-KERNEL=="ttyS3",   MODE="0660", GROUP="dialout"
-KERNEL=="ttyUSB0", MODE="0660", GROUP="dialout"
+RULES_FILE="/etc/udev/rules.d/99-node-red-serial.rules"
+echo "==> Adding udev rules at $RULES_FILE"
+$SUDO tee "$RULES_FILE" >/dev/null <<'EOF'
+# Make common serial devices accessible to dialout (Node-RED user should be in dialout)
+KERNEL=="ttyS0",    MODE="0660", GROUP="dialout", TAG+="systemd"
+KERNEL=="ttyS3",    MODE="0660", GROUP="dialout", TAG+="systemd"
+KERNEL=="ttyUSB[0-9]*", MODE="0660", GROUP="dialout", TAG+="systemd"
+KERNEL=="ttyACM[0-9]*", MODE="0660", GROUP="dialout", TAG+="systemd"
+
+# Optional stable symlinks (uncomment and customize if you like)
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="usb_ftdi0"
 EOF
 
-# Add user to dialout group (for serial access)
-echo "Adding $USER to dialout group..."
-sudo usermod -aG dialout $USER
+echo "==> Reloading udev rules..."
+$SUDO udevadm control --reload-rules
+$SUDO udevadm trigger
 
-# Reload udev rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-
+# ---------- 8) Final info ----------
+IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo "************************************************"
-echo "✅ Installation complete!"
-echo " Node-RED is running as a service."
-echo " Installed extras: Dashboard, Modbus, MQTT broker, InfluxDB, File nodes."
-echo " FFmpeg installed."
-echo " Serial ports /dev/ttyS0, /dev/ttyS3, /dev/ttyUSB0 accessible to dialout group."
-echo " Tailscale installed & running (use 'sudo tailscale up' to join your tailnet)."
-echo " Access Node-RED editor: http://<ip>:1880"
-echo " Dashboard UI: http://<ip>:1880/ui"
+echo " Node-RED is running as service 'node-red'"
+echo "   Service control: sudo systemctl [status|restart|stop] node-red"
+echo
+echo " Dashboard: http://$IP_ADDR:1880/ui"
+echo " Editor:    http://$IP_ADDR:1880"
+echo
+echo " If Dashboard/Editor are not reachable, confirm firewall rules."
 echo "************************************************"
